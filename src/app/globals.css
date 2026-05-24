@@ -593,6 +593,33 @@ textarea:focus {
   box-shadow: 0 28px 70px rgba(35, 31, 32, 0.26);
 }
 
+.admin-detail-modal {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+  padding: clamp(18px, 2.5vw, 26px);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(255, 248, 248, 0.99), rgba(255, 255, 255, 0.99));
+  box-shadow: 0 28px 70px rgba(35, 31, 32, 0.26);
+}
+
+.admin-detail-scroll {
+  display: grid;
+  gap: 18px;
+  min-height: 0;
+  overflow: hidden;
+  padding-right: 4px;
+}
+
+.admin-detail-result-list {
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .modal-heading {
   display: flex;
   align-items: center;

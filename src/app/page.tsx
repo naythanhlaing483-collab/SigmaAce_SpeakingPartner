@@ -117,6 +117,11 @@ type ApiResponse = {
   user?: UserAccount;
 };
 
+type FeedbackResponse = {
+  error?: string;
+  result?: SessionResult;
+};
+
 async function apiRequest(body?: Record<string, unknown>): Promise<ApiResponse> {
   const response = await fetch("/api/data", {
     body: body ? JSON.stringify(body) : undefined,
@@ -130,6 +135,21 @@ async function apiRequest(body?: Record<string, unknown>): Promise<ApiResponse> 
   }
 
   return payload;
+}
+
+async function getAiFeedbackResult(result: SessionResult) {
+  const response = await fetch("/api/openrouter/feedback", {
+    body: JSON.stringify({ result }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const payload = (await response.json()) as FeedbackResponse;
+
+  if (!response.ok && !payload.result) {
+    throw new Error(payload.error || "AI feedback request failed.");
+  }
+
+  return payload.result ?? result;
 }
 
 function formatClock(totalSeconds: number) {
@@ -701,11 +721,13 @@ function StudentHome({
 function ResultList({
   compactCards = false,
   emptyText,
+  listClassName = "",
   results,
   showTranscriptPreview = false,
 }: {
   compactCards?: boolean;
   emptyText: string;
+  listClassName?: string;
   results: SessionResult[];
   showTranscriptPreview?: boolean;
 }) {
@@ -728,8 +750,16 @@ function ResultList({
     );
   }
 
+  const listClasses = [
+    "result-list",
+    compactCards ? "result-compact-list" : "",
+    listClassName,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className={`result-list ${compactCards ? "result-compact-list" : ""}`}>
+    <div className={listClasses}>
       {results.map((result) => (
         <article
           key={result.id}
@@ -1304,55 +1334,66 @@ function AdminDashboard({
       </section>
 
       {detailStudent ? (
-        <section className="admin-card detail-card">
-          <div className="panel-heading">
-            <div className="student-identity">
-              <ProfileBadge user={detailStudent} />
-              <div>
-                <p className="eyebrow">Student Detail</p>
-                <h2>{getUserDisplayName(detailStudent)}</h2>
-                <span>
-                  {detailStudent.level} level · {detailStudent.status}
-                </span>
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="student-detail-title"
+        >
+          <section className="admin-detail-modal detail-card">
+            <div className="panel-heading">
+              <div className="student-identity">
+                <ProfileBadge user={detailStudent} />
+                <div>
+                  <p className="eyebrow">Student Detail</p>
+                  <h2 id="student-detail-title">{getUserDisplayName(detailStudent)}</h2>
+                  <span>
+                    {detailStudent.level} level · {detailStudent.status}
+                  </span>
+                </div>
               </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setDetailStudentId("")}
+              >
+                Close
+              </button>
             </div>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => setDetailStudentId("")}
-            >
-              Close
-            </button>
-          </div>
-          <div className="quality-metrics">
-            <div className="metric-card">
-              <span>Sessions</span>
-              <strong>{detailSummary.sessionCount}</strong>
+
+            <div className="admin-detail-scroll">
+              <div className="quality-metrics">
+                <div className="metric-card">
+                  <span>Sessions</span>
+                  <strong>{detailSummary.sessionCount}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Average Score</span>
+                  <strong>{detailSummary.averageScore}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Today Sessions</span>
+                  <strong>{detailSummary.todayCount}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Today Average</span>
+                  <strong>{detailSummary.todayAverage}</strong>
+                </div>
+              </div>
+              {detailStudent.dailyPerformanceNote ? (
+                <div className="recommendation-block">
+                  <p className="feedback-label">Daily Note</p>
+                  <p>{detailStudent.dailyPerformanceNote}</p>
+                </div>
+              ) : null}
+              <ResultList
+                results={detailResults}
+                emptyText="No results recorded for this student."
+                listClassName="admin-detail-result-list"
+              />
             </div>
-            <div className="metric-card">
-              <span>Average Score</span>
-              <strong>{detailSummary.averageScore}</strong>
-            </div>
-            <div className="metric-card">
-              <span>Today Sessions</span>
-              <strong>{detailSummary.todayCount}</strong>
-            </div>
-            <div className="metric-card">
-              <span>Today Average</span>
-              <strong>{detailSummary.todayAverage}</strong>
-            </div>
-          </div>
-          {detailStudent.dailyPerformanceNote ? (
-            <div className="recommendation-block">
-              <p className="feedback-label">Daily Note</p>
-              <p>{detailStudent.dailyPerformanceNote}</p>
-            </div>
-          ) : null}
-          <ResultList
-            results={detailResults}
-            emptyText="No results recorded for this student."
-          />
-        </section>
+          </section>
+        </div>
       ) : null}
 
     </main>
@@ -2020,9 +2061,17 @@ export default function Home() {
   };
 
   const saveSessionResult = async (result: SessionResult) => {
+    let scoredResult = result;
+
+    try {
+      scoredResult = await getAiFeedbackResult(result);
+    } catch {
+      scoredResult = result;
+    }
+
     const response = await apiRequest({
       action: "save-result",
-      result,
+      result: scoredResult,
     });
 
     if (response.data) {
