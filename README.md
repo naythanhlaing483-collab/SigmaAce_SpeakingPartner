@@ -1,4 +1,6 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Speaking Budy
+
+This is a [Next.js](https://nextjs.org) project for teen-friendly English speaking practice.
 
 ## Getting Started
 
@@ -15,6 +17,28 @@ bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Database Setup
+
+Create a local `.env.local` file with your Postgres connection string:
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/flashy_learn
+PGSSLMODE=disable
+```
+
+For hosted Postgres providers that require SSL, set `PGSSLMODE=require`.
+The app creates its own tables on first API use and seeds the default admin:
+
+```text
+Email: admin@flashylearn.local
+Password: Admin@12345
+```
+
+During local development, if Postgres is not running or `DATABASE_URL` is not
+set, the app automatically falls back to `.local-data/flashy-learn.json` so the
+landing page can continue. Set `LOCAL_STORE_FALLBACK=false` to require Postgres
+strictly in development.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Flashy Learn",
+  title: "Speaking Budy",
   description: "Teen-friendly English speaking practice landing page.",
 };
 
