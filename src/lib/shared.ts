@@ -26,15 +26,23 @@ export type TranscriptEntry = {
   timestamp: number;
 };
 
+export type ConversationMessage = TranscriptEntry & {
+  sessionResultId: string;
+  studentEmail: string;
+  studentId: string;
+};
+
 export type QualitySnapshot = {
   averageWordsPerTurn: number;
   balanceRatio: number;
   durationSeconds: number;
+  gapFeedback?: string;
   label: string;
   learnerTurns: number;
   overallScore: number;
   recommendations: string[];
   totalTurns: number;
+  weakWords?: string[];
 };
 
 export type SessionResult = QualitySnapshot & {
@@ -55,6 +63,7 @@ export type PasswordResetRequest = {
 };
 
 export type StoredData = {
+  conversationMessages?: ConversationMessage[];
   resetRequests: PasswordResetRequest[];
   results: SessionResult[];
   users: UserAccount[];

@@ -5,8 +5,6 @@ import {
   deleteStudent,
   getData,
   login,
-  requestPasswordReset,
-  resolveReset,
   saveDailyNote,
   saveResult,
   updateUserName,
@@ -24,7 +22,6 @@ type ActionBody = {
   note?: string;
   password?: string;
   profileImage?: string;
-  requestId?: string;
   result?: Parameters<typeof saveResult>[0];
   status?: AccountStatus;
   userId?: string;
@@ -77,10 +74,6 @@ export async function POST(request: NextRequest) {
           user: await login(body.email ?? "", body.password ?? ""),
         });
 
-      case "forgot":
-        await requestPasswordReset(body.email ?? "");
-        return ok({ data: await getData() });
-
       case "create-student":
         await createStudent(body.email ?? "", body.password ?? "", body.level ?? "Beginner");
         return ok({ data: await getData() });
@@ -123,10 +116,6 @@ export async function POST(request: NextRequest) {
           throw new Error("Missing result payload.");
         }
         await saveResult(body.result);
-        return ok({ data: await getData() });
-
-      case "resolve-reset":
-        await resolveReset(body.requestId ?? "");
         return ok({ data: await getData() });
 
       default:

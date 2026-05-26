@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "db:migrate:local": "node scripts/migrate-local-data-to-postgres.js",
     "start": "next start"
   },
   "dependencies": {

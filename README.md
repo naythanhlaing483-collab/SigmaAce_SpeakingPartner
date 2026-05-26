@@ -31,8 +31,19 @@ For hosted Postgres providers that require SSL, set `PGSSLMODE=require`.
 The app creates its own tables on first API use and seeds the default admin:
 
 ```text
-Email: admin@flashylearn.local
+Email: admin@sigmaace.local
 Password: Admin@12345
+```
+
+Saved speaking transcripts are stored in Postgres in both the
+`session_results.transcript` JSON field and the normalized
+`conversation_messages` table.
+
+To move existing local development data from `.local-data/flashy-learn.json`
+into Postgres after fixing `DATABASE_URL`, run:
+
+```bash
+npm run db:migrate:local
 ```
 
 During local development, if Postgres is not running or `DATABASE_URL` is not

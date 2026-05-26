@@ -49,7 +49,6 @@ const categories = [
   },
 ] as const satisfies readonly { name: SpeakingLevel; description: string }[];
 
-type AuthPanel = "login" | "forgot";
 type ViewState = "loading" | "home" | "portal" | "session" | "leaving";
 
 const emptySnapshot: QualitySnapshot = {
@@ -292,7 +291,6 @@ function AuthScreen({
   onLogin: (user: UserAccount) => void;
   onDataChange: (data: StoredData) => void;
 }) {
-  const [panel, setPanel] = useState<AuthPanel>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
@@ -321,61 +319,20 @@ function AuthScreen({
     }
   };
 
-  const handleForgot = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const normalizedEmail = email.trim().toLowerCase();
-
-    try {
-      const response = await apiRequest({
-        action: "forgot",
-        email: normalizedEmail,
-      });
-
-      if (response.data) {
-        onDataChange(response.data);
-      }
-
-      setPanel("login");
-      setMessage("Password reset request sent to the admin dashboard.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Reset request failed.");
-    }
-  };
-
   return (
     <main className="auth-shell">
       <section className="auth-card">
         <div className="auth-logo-wrap">
           <Image src="/SA1.png" alt="SA1 logo" width={104} height={104} priority />
         </div>
-        <div className="auth-tabs" aria-label="Authentication options">
-          <button
-            type="button"
-            className={panel === "login" ? "auth-tab-active" : ""}
-            onClick={() => setPanel("login")}
-          >
-            Login
-          </button>
-          <button
-            type="button"
-            className={panel === "forgot" ? "auth-tab-active" : ""}
-            onClick={() => setPanel("forgot")}
-          >
-            Forgot
-          </button>
-        </div>
 
         <form
           className="form-stack"
-          onSubmit={panel === "login" ? handleLogin : handleForgot}
+          onSubmit={handleLogin}
         >
           <div>
-            <p className="eyebrow">
-              {panel === "login" ? "Account Login" : "Password Help"}
-            </p>
-            <h2>
-              {panel === "login" ? "Enter your account" : "Ask admin to reset"}
-            </h2>
+            <p className="eyebrow">Account Login</p>
+            <h2>Enter your account</h2>
           </div>
 
           <label>
@@ -389,24 +346,22 @@ function AuthScreen({
             />
           </label>
 
-          {panel !== "forgot" ? (
-            <label>
-              Password
-              <input
-                autoComplete={panel === "login" ? "current-password" : "new-password"}
-                minLength={6}
-                required
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-            </label>
-          ) : null}
+          <label>
+            Password
+            <input
+              autoComplete="current-password"
+              minLength={6}
+              required
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
 
           {message ? <p className="form-message">{message}</p> : null}
 
           <button type="submit" className="call-button">
-            {panel === "login" ? "Login" : "Request Reset"}
+            Login
           </button>
         </form>
 
@@ -782,12 +737,19 @@ function ResultList({
               <p>
                 Conversation quality: {result.label || "Available after call"}
               </p>
+              {result.weakWords?.length ? (
+                <p>Weak words: {result.weakWords.join(", ")}</p>
+              ) : null}
             </div>
           ) : (
             <div>
               <strong>{result.label}</strong>
               <span>{formatDate(result.createdAt)}</span>
               {result.notes ? <p>{result.notes}</p> : null}
+              {result.weakWords?.length ? (
+                <p>Weak words: {result.weakWords.join(", ")}</p>
+              ) : null}
+              {result.gapFeedback ? <p>{result.gapFeedback}</p> : null}
             </div>
           )}
           <div className="result-actions">
@@ -877,6 +839,9 @@ function AdminDashboard({
   const [manualScore, setManualScore] = useState("70");
   const [manualNotes, setManualNotes] = useState("");
   const [dailyNote, setDailyNote] = useState("");
+  const [passwordStudentId, setPasswordStudentId] = useState("");
+  const [studentNewPassword, setStudentNewPassword] = useState("");
+  const [passwordMessage, setPasswordMessage] = useState("");
   const students = data.users.filter((user) => user.role === "student");
   const activeStudents = students.filter((user) => user.status === "active");
   const todayResults = data.results.filter((result) => isToday(result.createdAt));
@@ -1013,13 +978,35 @@ function AdminDashboard({
     setManualNotes("");
   };
 
-  const resolveResetRequest = async (requestId: string) => {
-    refreshFromResponse(
-      await apiRequest({
-        action: "resolve-reset",
-        requestId,
-      }),
-    );
+  const changeStudentPassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!passwordStudentId) {
+      setPasswordMessage("Choose a student account first.");
+      return;
+    }
+
+    try {
+      refreshFromResponse(
+        await apiRequest({
+          action: "change-password",
+          password: studentNewPassword,
+          userId: passwordStudentId,
+        }),
+      );
+      const student = students.find((user) => user.id === passwordStudentId);
+
+      setStudentNewPassword("");
+      setPasswordMessage(
+        student
+          ? `Password changed for ${getUserDisplayName(student)}.`
+          : "Password changed.",
+      );
+    } catch (error) {
+      setPasswordMessage(
+        error instanceof Error ? error.message : "Password change failed.",
+      );
+    }
   };
 
   const saveDailyNote = async (event: FormEvent<HTMLFormElement>) => {
@@ -1169,49 +1156,35 @@ function AdminDashboard({
           </button>
         </form>
 
-        <section className="admin-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Password Requests</p>
-              <h2>Forgot password queue</h2>
-            </div>
+        <form className="admin-card form-stack" onSubmit={changeStudentPassword}>
+          <div>
+            <p className="eyebrow">Account Security</p>
+            <h2>Set student password</h2>
           </div>
-          <div className="management-list">
-            {data.resetRequests.length ? (
-              data.resetRequests.map((request) => {
-                const resetUser = data.users.find((user) => user.email === request.email);
-
-                return (
-                  <article key={request.id} className="management-row">
-                    <div>
-                      <strong>
-                        {resetUser ? getUserDisplayName(resetUser) : request.email}
-                      </strong>
-                      <span>
-                        {request.status === "resolved"
-                          ? `Resolved: ${request.newPassword}`
-                          : formatDate(request.createdAt)}
-                      </span>
-                    </div>
-                    {request.status === "pending" ? (
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => resolveResetRequest(request.id)}
-                      >
-                        Generate Temp Password
-                      </button>
-                    ) : null}
-                  </article>
-                );
-              })
-            ) : (
-              <div className="empty-panel">
-                <p>No password reset requests.</p>
-              </div>
-            )}
-          </div>
-        </section>
+          <StudentSelect
+            students={students}
+            value={passwordStudentId}
+            onChange={(value) => {
+              setPasswordStudentId(value);
+              setPasswordMessage("");
+            }}
+          />
+          <label>
+            New Password
+            <input
+              autoComplete="new-password"
+              minLength={6}
+              required
+              type="password"
+              value={studentNewPassword}
+              onChange={(event) => setStudentNewPassword(event.target.value)}
+            />
+          </label>
+          {passwordMessage ? <p className="form-message">{passwordMessage}</p> : null}
+          <button type="submit" className="ghost-button">
+            Change Password
+          </button>
+        </form>
       </section>
 
       <section className="admin-card">
@@ -1900,6 +1873,17 @@ function TestingSession({
                     ))}
                   </ul>
                 </div>
+                {qualitySnapshot.weakWords?.length || qualitySnapshot.gapFeedback ? (
+                  <div className="recommendation-block">
+                    <p className="feedback-label">Weak Words And Gaps</p>
+                    {qualitySnapshot.weakWords?.length ? (
+                      <p>{qualitySnapshot.weakWords.join(", ")}</p>
+                    ) : null}
+                    {qualitySnapshot.gapFeedback ? (
+                      <p>{qualitySnapshot.gapFeedback}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </>
             ) : (
               <div className="empty-panel quality-empty">

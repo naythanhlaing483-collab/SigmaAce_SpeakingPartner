@@ -15,6 +15,7 @@ import type {
   StoredData,
   TranscriptEntry,
   UserAccount,
+  ConversationMessage,
 } from "@/lib/shared";
 
 type UserRow = {
@@ -36,6 +37,7 @@ type ResultRow = {
   balance_ratio: string;
   created_at: string;
   duration_seconds: number;
+  gap_feedback: string | null;
   id: string;
   label: string;
   learner_turns: number;
@@ -46,6 +48,19 @@ type ResultRow = {
   student_id: string;
   total_turns: number;
   transcript: TranscriptEntry[] | string;
+  weak_words: string[] | string;
+};
+
+type ConversationRow = {
+  created_at: string;
+  entry_id: string;
+  message: string;
+  message_index: number;
+  role: TranscriptEntry["role"];
+  session_result_id: string;
+  source: TranscriptEntry["source"];
+  student_email: string;
+  student_id: string;
 };
 
 type ResetRow = {
@@ -159,8 +174,24 @@ async function ensureSchema() {
       balance_ratio NUMERIC NOT NULL,
       recommendations JSONB NOT NULL,
       transcript JSONB NOT NULL,
+      weak_words JSONB NOT NULL DEFAULT '[]'::jsonb,
+      gap_feedback TEXT,
       notes TEXT,
       created_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+      id TEXT PRIMARY KEY,
+      session_result_id TEXT NOT NULL REFERENCES session_results(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      student_email TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'agent')),
+      source TEXT NOT NULL CHECK (source IN ('user', 'ai')),
+      message TEXT NOT NULL,
+      message_index INTEGER NOT NULL,
+      created_at BIGINT NOT NULL,
+      UNIQUE (session_result_id, entry_id)
     );
 
     CREATE TABLE IF NOT EXISTS password_reset_requests (
@@ -170,14 +201,60 @@ async function ensureSchema() {
       new_password TEXT,
       created_at BIGINT NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS session_results_student_created_idx
+      ON session_results (student_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS conversation_messages_result_order_idx
+      ON conversation_messages (session_result_id, message_index, created_at);
+    CREATE INDEX IF NOT EXISTS password_reset_requests_email_created_idx
+      ON password_reset_requests (email, created_at DESC);
   `);
 
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS name_changed BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_changed BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_performance_note TEXT;
+    ALTER TABLE session_results ADD COLUMN IF NOT EXISTS transcript JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE session_results ADD COLUMN IF NOT EXISTS weak_words JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE session_results ADD COLUMN IF NOT EXISTS gap_feedback TEXT;
     UPDATE users
     SET name = split_part(email, '@', 1)
     WHERE name IS NULL OR btrim(name) = '';
+  `);
+
+  await pool.query(`
+    INSERT INTO conversation_messages (
+      id, session_result_id, student_id, student_email, entry_id, role, source,
+      message, message_index, created_at
+    )
+    SELECT
+      session_results.id || ':' || COALESCE(entry.value->>'entryId', entry.ordinality::text),
+      session_results.id,
+      session_results.student_id,
+      session_results.student_email,
+      COALESCE(entry.value->>'entryId', entry.ordinality::text),
+      CASE
+        WHEN entry.value->>'role' IN ('user', 'agent') THEN entry.value->>'role'
+        ELSE 'agent'
+      END,
+      CASE
+        WHEN entry.value->>'source' IN ('user', 'ai') THEN entry.value->>'source'
+        ELSE 'ai'
+      END,
+      COALESCE(entry.value->>'message', ''),
+      (entry.ordinality - 1)::integer,
+      COALESCE((entry.value->>'timestamp')::bigint, session_results.created_at)
+    FROM session_results
+    CROSS JOIN LATERAL jsonb_array_elements(session_results.transcript)
+      WITH ORDINALITY AS entry(value, ordinality)
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM conversation_messages
+      WHERE conversation_messages.session_result_id = session_results.id
+    )
+    ON CONFLICT (session_result_id, entry_id) DO NOTHING;
   `);
 
   const admin = await pool.query<{ id: string; password_hash: string }>(
@@ -242,6 +319,7 @@ async function ready() {
 function cloneData(data: LocalStoredData): StoredData {
   return JSON.parse(
     JSON.stringify({
+      conversationMessages: data.conversationMessages ?? [],
       resetRequests: data.resetRequests,
       results: data.results,
       users: data.users,
@@ -290,6 +368,7 @@ async function readLocalData() {
     return data;
   } catch {
     const data: LocalStoredData = {
+      conversationMessages: [],
       passwordHashes: {},
       resetRequests: [],
       results: [],
@@ -353,6 +432,7 @@ function mapResult(row: ResultRow): SessionResult {
     balanceRatio: Number(row.balance_ratio),
     createdAt: Number(row.created_at),
     durationSeconds: row.duration_seconds,
+    gapFeedback: row.gap_feedback ?? undefined,
     id: row.id,
     label: row.label,
     learnerTurns: row.learner_turns,
@@ -363,6 +443,20 @@ function mapResult(row: ResultRow): SessionResult {
     studentId: row.student_id,
     totalTurns: row.total_turns,
     transcript: jsonValue<TranscriptEntry[]>(row.transcript),
+    weakWords: jsonValue<string[]>(row.weak_words),
+  };
+}
+
+function mapConversation(row: ConversationRow): ConversationMessage {
+  return {
+    entryId: row.entry_id,
+    message: row.message,
+    role: row.role,
+    sessionResultId: row.session_result_id,
+    source: row.source,
+    studentEmail: row.student_email,
+    studentId: row.student_id,
+    timestamp: Number(row.created_at),
   };
 }
 
@@ -383,15 +477,32 @@ export async function getData(): Promise<StoredData> {
     return cloneData(await readLocalData());
   }
 
-  const [users, results, resetRequests] = await Promise.all([
+  const [users, results, resetRequests, conversationMessages] = await Promise.all([
     pool.query<UserRow>("SELECT * FROM users ORDER BY created_at DESC"),
     pool.query<ResultRow>("SELECT * FROM session_results ORDER BY created_at DESC"),
     pool.query<ResetRow>("SELECT * FROM password_reset_requests ORDER BY created_at DESC"),
+    pool.query<ConversationRow>(
+      "SELECT * FROM conversation_messages ORDER BY session_result_id, message_index, created_at",
+    ),
   ]);
+  const messagesByResult = new Map<string, TranscriptEntry[]>();
+
+  for (const row of conversationMessages.rows) {
+    const messages = messagesByResult.get(row.session_result_id) ?? [];
+
+    messages.push(mapConversation(row));
+    messagesByResult.set(row.session_result_id, messages);
+  }
 
   return {
+    conversationMessages: conversationMessages.rows.map(mapConversation),
     resetRequests: resetRequests.rows.map(mapReset),
-    results: results.rows.map(mapResult),
+    results: results.rows.map((row) => {
+      const result = mapResult(row);
+      const transcript = messagesByResult.get(result.id);
+
+      return transcript?.length ? { ...result, transcript } : result;
+    }),
     users: users.rows.map(mapUser),
   };
 }
@@ -431,43 +542,6 @@ export async function login(email: string, password: string) {
   }
 
   return mapUser(user);
-}
-
-export async function requestPasswordReset(email: string) {
-  const pool = await ready();
-  const normalizedEmail = email.trim().toLowerCase();
-
-  if (!pool) {
-    await updateLocalData((data) => {
-      if (!data.users.some((user) => user.email === normalizedEmail)) {
-        throw new Error("No account was found for that email.");
-      }
-
-      data.resetRequests.unshift({
-        createdAt: Date.now(),
-        email: normalizedEmail,
-        id: createId("reset"),
-        status: "pending",
-      });
-    });
-    return;
-  }
-
-  const user = await pool.query("SELECT id FROM users WHERE email = $1 LIMIT 1", [
-    normalizedEmail,
-  ]);
-
-  if (!user.rowCount) {
-    throw new Error("No account was found for that email.");
-  }
-
-  await pool.query(
-    `
-      INSERT INTO password_reset_requests (id, email, status, created_at)
-      VALUES ($1, $2, 'pending', $3)
-    `,
-    [createId("reset"), normalizedEmail, Date.now()],
-  );
 }
 
 export async function createStudent(email: string, password: string, level: string) {
@@ -658,6 +732,12 @@ export async function updateStudent(
         }
       }
 
+      for (const message of data.conversationMessages ?? []) {
+        if (message.studentId === userId) {
+          message.studentEmail = normalizedEmail;
+        }
+      }
+
       for (const request of data.resetRequests) {
         if (request.email === previousEmail) {
           request.email = normalizedEmail;
@@ -688,6 +768,10 @@ export async function updateStudent(
       [normalizedEmail, userId],
     );
     await pool.query(
+      "UPDATE conversation_messages SET student_email = $1 WHERE student_id = $2",
+      [normalizedEmail, userId],
+    );
+    await pool.query(
       `
         UPDATE password_reset_requests
         SET email = $1
@@ -715,6 +799,9 @@ export async function deleteStudent(userId: string) {
 
       data.users = data.users.filter((item) => item.id !== userId);
       data.results = data.results.filter((result) => result.studentId !== userId);
+      data.conversationMessages = data.conversationMessages?.filter(
+        (message) => message.studentId !== userId,
+      );
       data.resetRequests = data.resetRequests.filter(
         (request) => request.email !== user.email,
       );
@@ -811,84 +898,98 @@ export async function saveResult(result: SessionResult) {
 
   if (!pool) {
     await updateLocalData((data) => {
+      data.conversationMessages = [
+        ...(data.conversationMessages ?? []).filter(
+          (message) => message.sessionResultId !== result.id,
+        ),
+        ...result.transcript.map((entry) => ({
+          ...entry,
+          sessionResultId: result.id,
+          studentEmail: result.studentEmail,
+          studentId: result.studentId,
+        })),
+      ];
+      data.results = data.results.filter((item) => item.id !== result.id);
       data.results.unshift(result);
     });
     return;
   }
 
-  await pool.query(
-    `
-      INSERT INTO session_results (
-        id, student_id, student_email, label, overall_score, duration_seconds,
-        learner_turns, total_turns, average_words_per_turn, balance_ratio,
-        recommendations, transcript, notes, created_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14)
-    `,
-    [
-      result.id,
-      result.studentId,
-      result.studentEmail,
-      result.label,
-      result.overallScore,
-      result.durationSeconds,
-      result.learnerTurns,
-      result.totalTurns,
-      result.averageWordsPerTurn,
-      result.balanceRatio,
-      JSON.stringify(result.recommendations),
-      JSON.stringify(result.transcript),
-      result.notes ?? null,
-      result.createdAt,
-    ],
-  );
-}
-
-export async function resolveReset(requestId: string) {
-  const pool = await ready();
-
-  if (!pool) {
-    await updateLocalData((data) => {
-      const request = data.resetRequests.find((item) => item.id === requestId);
-
-      if (!request) {
-        throw new Error("Password reset request was not found.");
-      }
-
-      request.newPassword = `Temp-${Math.random().toString(36).slice(2, 8)}`;
-      request.status = "resolved";
-      const user = data.users.find((item) => item.email === request.email);
-
-      if (user) {
-        data.passwordHashes ??= {};
-        data.passwordHashes[user.id] = hashPassword(request.newPassword);
-      }
-    });
-    return;
-  }
-
-  const request = await pool.query<ResetRow>(
-    "SELECT * FROM password_reset_requests WHERE id = $1 LIMIT 1",
-    [requestId],
-  );
-  const row = request.rows[0];
-
-  if (!row) {
-    throw new Error("Password reset request was not found.");
-  }
-
-  const newPassword = `Temp-${Math.random().toString(36).slice(2, 8)}`;
-
   await pool.query("BEGIN");
   try {
-    await pool.query("UPDATE users SET password_hash = $1 WHERE email = $2", [
-      hashPassword(newPassword),
-      row.email,
-    ]);
     await pool.query(
-      "UPDATE password_reset_requests SET status = 'resolved', new_password = $1 WHERE id = $2",
-      [newPassword, requestId],
+      `
+        INSERT INTO session_results (
+          id, student_id, student_email, label, overall_score, duration_seconds,
+          learner_turns, total_turns, average_words_per_turn, balance_ratio,
+          recommendations, transcript, weak_words, gap_feedback, notes, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
+        ON CONFLICT (id) DO UPDATE SET
+          student_id = EXCLUDED.student_id,
+          student_email = EXCLUDED.student_email,
+          label = EXCLUDED.label,
+          overall_score = EXCLUDED.overall_score,
+          duration_seconds = EXCLUDED.duration_seconds,
+          learner_turns = EXCLUDED.learner_turns,
+          total_turns = EXCLUDED.total_turns,
+          average_words_per_turn = EXCLUDED.average_words_per_turn,
+          balance_ratio = EXCLUDED.balance_ratio,
+          recommendations = EXCLUDED.recommendations,
+          transcript = EXCLUDED.transcript,
+          weak_words = EXCLUDED.weak_words,
+          gap_feedback = EXCLUDED.gap_feedback,
+          notes = EXCLUDED.notes,
+          created_at = EXCLUDED.created_at
+      `,
+      [
+        result.id,
+        result.studentId,
+        result.studentEmail,
+        result.label,
+        result.overallScore,
+        result.durationSeconds,
+        result.learnerTurns,
+        result.totalTurns,
+        result.averageWordsPerTurn,
+        result.balanceRatio,
+        JSON.stringify(result.recommendations),
+        JSON.stringify(result.transcript),
+        JSON.stringify(result.weakWords ?? []),
+        result.gapFeedback ?? null,
+        result.notes ?? null,
+        result.createdAt,
+      ],
     );
+
+    await pool.query("DELETE FROM conversation_messages WHERE session_result_id = $1", [
+      result.id,
+    ]);
+
+    for (const [index, entry] of result.transcript.entries()) {
+      await pool.query(
+        `
+          INSERT INTO conversation_messages (
+            id, session_result_id, student_id, student_email, entry_id, role,
+            source, message, message_index, created_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `,
+        [
+          `${result.id}:${entry.entryId}`,
+          result.id,
+          result.studentId,
+          result.studentEmail,
+          entry.entryId,
+          entry.role,
+          entry.source,
+          entry.message,
+          index,
+          entry.timestamp,
+        ],
+      );
+    }
+
     await pool.query("COMMIT");
   } catch (error) {
     await pool.query("ROLLBACK");
